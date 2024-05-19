@@ -1,5 +1,5 @@
-import { writeAll } from "https://deno.land/std@0.128.0/streams/conversion.ts#^";
-import { readN, uint8ArrayToReader } from "./utils.ts";
+import { writeAll, Reader } from "./deps.ts";
+import { readN } from "./utils.ts";
 
 export const SOCKS_VERSION = 5;
 export const USERNAME_PASSWORD_AUTH_VERSION = 1;
@@ -84,7 +84,7 @@ function serializeAddress(hostname: string, port: number) {
   ]);
 }
 
-async function deserializeAddress(r: Deno.Reader) {
+async function deserializeAddress(r: Reader) {
   const [type] = await readN(r, 1);
   const hostname = await (async () => {
     if (type === AddrType.IPv4) {
@@ -125,11 +125,6 @@ interface AuthConfig {
   password: string;
 }
 
-interface UdpProxyInfo {
-  tcpConn: Deno.Conn;
-  addr: { hostname: string; port: number; transport: "udp" };
-}
-
 export type ClientConfig = AddrConfig | (AddrConfig & AuthConfig);
 
 export class Client {
@@ -143,6 +138,7 @@ export class Client {
   }
 
   #connectAndRequest = async (cmd: Command, hostname: string, port: number) => {
+    // @ts-ignore: lib
     const conn = await Deno.connect({
       hostname: this.#config.hostname,
       port: this.#config.port,
@@ -237,6 +233,7 @@ export class Client {
     };
   };
 
+  // @ts-ignore: lib
   async connect(opts: Deno.ConnectOptions): Promise<Deno.TcpConn> {
     const remoteAddr = {
       hostname: opts.hostname ?? "127.0.0.1",
@@ -280,112 +277,7 @@ export class Client {
       write: conn.write.bind(conn),
       close: conn.close.bind(conn),
       closeWrite: conn.closeWrite.bind(conn),
-    };
-  }
-
-  listenDatagram(
-    opts: Deno.ListenOptions & { transport: "udp" },
-  ): Deno.DatagramConn & { readonly isReady: Promise<void> } {
-    const udpConn = Deno.listenDatagram(opts);
-    let proxyInfo: null | UdpProxyInfo = null;
-
-    const close = (throwErr = false) => {
-      let err: unknown;
-      try {
-        proxyInfo?.tcpConn.close();
-      } catch (e) {
-        err = e;
-      }
-      try {
-        udpConn.close();
-      } catch (e) {
-        err = e;
-      }
-      if (err && throwErr) {
-        throw err;
-      }
-    };
-
-    const isReady = (async () => {
-      try {
-        const localAddr = udpConn.addr as Deno.NetAddr;
-        const { conn, hostname, port } = await this.#connectAndRequest(
-          Command.UdpAssociate,
-          localAddr.hostname,
-          localAddr.port,
-        );
-        proxyInfo = {
-          tcpConn: conn,
-          addr: {
-            hostname,
-            port,
-            transport: "udp",
-          },
-        };
-        // close UDP connection when TCP connection closes
-        (async () => {
-          const buff = new Uint8Array(1024);
-          while (true) {
-            const val = await conn.read(buff).catch(() => null);
-            if (val === null) {
-              break;
-            }
-          }
-          close();
-        })();
-      } catch (e) {
-        close();
-        throw e;
-      }
-    })();
-
-    return {
-      get isReady() {
-        return isReady;
-      },
-      get addr() {
-        return proxyInfo ? proxyInfo.addr : udpConn.addr;
-      },
-      async send(p: Uint8Array, addr: Deno.Addr) {
-        if (!proxyInfo) {
-          await isReady;
-        }
-
-        const netAddr = addr as Deno.NetAddr;
-        const serializedAddress = serializeAddress(
-          netAddr.hostname,
-          netAddr.port,
-        );
-        const msg = new Uint8Array(3 + serializedAddress.length + p.length);
-        msg.set(serializedAddress, 3);
-        msg.set(p, 3 + serializedAddress.length);
-        return udpConn.send(msg, proxyInfo!.addr);
-      },
-      async receive(p?: Uint8Array): Promise<[Uint8Array, Deno.Addr]> {
-        if (!proxyInfo) {
-          await isReady;
-        }
-
-        const buff = new Uint8Array(p ? p.length + 1024 : 2048);
-        const [res] = await udpConn.receive(buff);
-        // if first two reserved bytes are not zero, or the fragment value is
-        // not zero, then ignore the datagram
-        if (res[0] || res[1] || res[2]) {
-          return this.receive(p);
-        }
-
-        const { hostname, port, bytesRead } = await deserializeAddress(
-          uint8ArrayToReader(res.subarray(3)),
-        );
-        return [
-          res.subarray(3 + bytesRead),
-          { hostname, port, transport: "udp" },
-        ];
-      },
-      close() {
-        close(true);
-      },
-      [Symbol.asyncIterator]: udpConn[Symbol.asyncIterator],
-    };
+      // @ts-ignore: lib
+    } as unknown as Deno.TcpConn;
   }
 }
